@@ -424,6 +424,7 @@ struct Bot {
     V3 lastEnemyPos;
     double lastEnemyT = -100;
     bool camp = false;
+    double huntB = 0, huntUntil = -1;
     bool haveHide = false;
     double hideX = 0, hideY = 0, hideR = -1;
     V3 wp;
@@ -1103,6 +1104,31 @@ struct Bot {
                     }
                 }
             }
+            // ---- hunting instincts: chase a fresh target, or walk towards combat noises
+            bool chase = false, hunt = false;
+            V3 chasePos;
+            if (!GHOST && t - lastEnemyT < 6.0 && hdist(lastEnemyPos, pos) > 10 && hpFrac > 0.35) {
+                chase = true;
+                chasePos = lastEnemyPos;
+            }
+            if (!GHOST && !chase && hpFrac > 0.4) {
+                double bestAge = 1e9;
+                for (auto& sd : o["sounds"]) {
+                    string k = sd.value("kind", "");
+                    string dst = sd.value("dist", "far");
+                    if (dst == "far") continue;
+                    if (!(k == "gun" || k == "laser" || k == "laser_charge" || k == "lightning" || k == "mortar" || k == "explosion" ||
+                          k == "step" || k == "boost" || k == "jet" || k == "reload"))
+                        continue;
+                    double age = num(sd, "age", 0);
+                    if (age < bestAge) {
+                        bestAge = age;
+                        huntB = num(sd, "bearing", yaw);
+                        huntUntil = t + 4.0;
+                    }
+                }
+                if (t < huntUntil) hunt = true;
+            }
             // supply drop worth walking to
             bool haveDrop = false;
             V3 dropPos;
@@ -1211,6 +1237,16 @@ struct Bot {
                 dy = py * strafeSign + zy * 0.5;
                 moving = true;
                 aimYaw = lastHitBearing;
+            } else if (chase) {
+                mode = "chase";
+                dx = chasePos.x - pos.x;
+                dy = chasePos.y - pos.y;
+                moving = true;
+            } else if (hunt) {
+                mode = "hunt";
+                dx = cos(huntB);
+                dy = sin(huntB);
+                moving = true;
             } else if (haveDrop) {
                 mode = "drop";
                 double ddx = dropPos.x - pos.x, ddy = dropPos.y - pos.y;
@@ -1478,7 +1514,7 @@ int main() {
             } catch (...) {
                 cerr << "hello parse failed\n";
             }
-            sendLine("{\"type\":\"ready\",\"name\":\"osu-cpp-berserk\"}\n");
+            sendLine("{\"type\":\"ready\",\"name\":\"osu-cpp-hunter\"}\n");
         } else if (type == "obs") {
             if (!haveHello) continue;
             try {
