@@ -927,8 +927,24 @@ struct Bot {
                     int r = weaponRank(k);
                     if (r == 0) continue;
                     if (k == held[0] || k == held[1]) continue;
-                    if (!emptySlot && r <= heldRank) continue;
-                    if (!emptySlot && laserChargeNow > 0) continue;
+                    int candDrop = -1;
+                    if (!emptySlot) {
+                        bool allowed = false;
+                        if (gunSlot >= 0) {
+                            int ss = 1 - gunSlot;
+                            string sk = slotKind[ss];
+                            bool pair = (k == "lightning" && sk == "laser") || (k == "laser" && sk == "lightning");
+                            if (pair) {
+                                allowed = true;
+                                candDrop = gunSlot;  // swap the gun out for the lightning+laser pair
+                            } else if (r > weaponRank(sk)) {
+                                allowed = true;
+                                candDrop = ss;
+                            }
+                        }
+                        if (!allowed) continue;
+                        if (laserChargeNow > 0 && candDrop == laserSlot) continue;
+                    }
                     V3 pp = getV3(pk["pos"]);
                     double dd = hdist(pp, pos);
                     double sc = dd - r * 12;
@@ -938,12 +954,11 @@ struct Bot {
                         lootY = pp.y;
                         haveLoot = true;
                         wantRank = r;
+                        take = -1;
+                        drop = -1;
                         if (dd < 3.6) {
                             take = id;
-                            if (!emptySlot) {
-                                // swap out the non-gun slot
-                                drop = (gunSlot == 0) ? 1 : 0;
-                            }
+                            if (!emptySlot) drop = candDrop;
                         }
                     }
                 }
@@ -995,7 +1010,7 @@ struct Bot {
             int farmIdx = -1;
             V3 farmPos, farmVel;
             bool farmIsNpc = false;
-            if (t < 320 && cubesNow < 10 && hpFrac > 0.6 && !zoneUrgent && !haveLoot && (gunSlot >= 0)) {
+            if (t < 320 && cubesNow < 10 && hpFrac > 0.6 && !zoneUrgent && !haveLoot && (gunSlot >= 0 || ltnSlot >= 0)) {
                 double bd = 140;
                 int idx = 0;
                 for (auto& cr : o["crates"]) {
@@ -1125,7 +1140,7 @@ struct Bot {
                 }
                 farmFire = true;
                 speed = 0.8;
-            } else if (hpFrac > 0.5 && !zoneUrgent && ((t < 150 && ltnSlot < 0 && laserSlot < 0 && mortSlot < 0) || (t < 220 && cubesNow < 5))) {
+            } else if (hpFrac > 0.5 && !zoneUrgent && ((t < 150 && !(ltnSlot >= 0 && laserSlot >= 0)) || (t < 220 && cubesNow < 5))) {
                 mode = "explore";
                 bool need = !haveWp || t - wpT > 25 || hdist(wp, pos) < 14;
                 if (need) {
@@ -1336,7 +1351,7 @@ int main() {
             } catch (...) {
                 cerr << "hello parse failed\n";
             }
-            sendLine("{\"type\":\"ready\",\"name\":\"osu-cpp-bot\"}\n");
+            sendLine("{\"type\":\"ready\",\"name\":\"osu-cpp-v6\"}\n");
         } else if (type == "obs") {
             if (!haveHello) continue;
             try {
