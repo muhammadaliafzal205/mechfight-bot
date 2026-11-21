@@ -8,6 +8,7 @@ using json = nlohmann::json;
 using namespace std;
 
 static const double PI = 3.14159265358979323846;
+static bool GHOST = false;  // camp mode (hurt): silent, hidden, snipes unseen targets only
 static inline double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 static inline double wrap(double a) {
     while (a > PI) a -= 2 * PI;
@@ -77,6 +78,7 @@ struct GameMap {
     static constexpr double LS = 2.0;
     int LW = 0, LH = 0;
     vector<float> lbase, ltop;
+    vector<float> openness;
 
     double ground(double x, double y) const {
         if (terr.empty()) return 0;
@@ -138,6 +140,7 @@ struct GameMap {
                 prisms.push_back(std::move(pr));
             }
             buildGrids();
+            buildOpenness();
             loaded = true;
             return true;
         } catch (...) {
@@ -203,6 +206,30 @@ struct GameMap {
                     }
                 }
         }
+    }
+
+    void buildOpenness() {
+        openness.assign((size_t)W * H, 0.f);
+        const int ND = 12;
+        for (int j = 0; j < H; j++)
+            for (int i = 0; i < W; i++) {
+                size_t id0 = (size_t)j * W + i;
+                if (blocked[id0]) continue;
+                double cx = OX + (i + 0.5) * CS, cy = OY + (j + 0.5) * CS;
+                double sum = 0;
+                for (int k = 0; k < ND; k++) {
+                    double a = 2 * PI * k / ND, ca = cos(a), sa = sin(a), d = 4;
+                    for (; d <= 150; d += 3) {
+                        double x = cx + ca * d, y = cy + sa * d;
+                        int li = (int)floor((x - OX) / LS), lj = (int)floor((y - OY) / LS);
+                        if (li < 0 || lj < 0 || li >= LW || lj >= LH) break;
+                        size_t id = (size_t)lj * LW + li;
+                        if (ltop[id] > -1e8f && ltop[id] - lbase[id] > 6) break;
+                    }
+                    sum += min(d, 150.0);
+                }
+                openness[id0] = (float)(sum / ND);
+            }
     }
 
     bool navBlockedXY(double x, double y) const {
@@ -395,6 +422,9 @@ struct Bot {
     int lastTakeId = -1;
     V3 lastEnemyPos;
     double lastEnemyT = -100;
+    bool camp = false;
+    bool haveHide = false;
+    double hideX = 0, hideY = 0, hideR = -1;
     V3 wp;
     double wpT = -100;
     bool haveWp = false;
@@ -470,6 +500,47 @@ struct Bot {
         return bm;
     }
 
+    void pickHideout(const V3& me, double cx, double cy, double R) {
+        hideR = R;
+        if (!map.loaded) return;
+        map.flow(me.x, me.y);  // distances from my position
+        double best = 1e18;
+        long bi = -1;
+        for (int j = 0; j < map.H; j++)
+            for (int i = 0; i < map.W; i++) {
+                size_t id = (size_t)j * map.W + i;
+                if (map.blocked[id]) continue;
+                float c = map.cost[id];
+                if (c >= GameMap::INF / 2 || c > 220) continue;
+                double wx = map.OX + (i + 0.5) * GameMap::CS, wy = map.OY + (j + 0.5) * GameMap::CS;
+                double d = hypot(wx - cx, wy - cy);
+                if (d > R * 0.8) continue;
+                double sc = map.openness[id] + 0.9 * c + 0.1 * fabs(d - R * 0.55);
+                if (sc < best) {
+                    best = sc;
+                    bi = (long)id;
+                }
+            }
+        if (bi >= 0) {
+            hideX = map.OX + ((bi % map.W) + 0.5) * GameMap::CS;
+            hideY = map.OY + ((bi / map.W) + 0.5) * GameMap::CS;
+        } else {
+            hideX = cx;
+            hideY = cy;
+        }
+        haveHide = true;
+        map.flowGX = 1e9;  // force a fresh flow field towards the new goal
+    }
+
+    // could this enemy see me right now (proximity sensors or inside its 120 degree wedge, with line of sight)?
+    bool canSeeUs(const Enemy& e, const V3& myEye) {
+        if (e.dist <= 47) return true;
+        if (e.dist > 205) return false;
+        double brg = atan2(myEye.y - e.pos.y, myEye.x - e.pos.x);
+        if (fabs(wrap(brg - e.aimYaw)) > 1.15) return false;
+        return map.los(V3{e.pos.x, e.pos.y, e.pos.z + 8}, myEye);
+    }
+
     static double angDiff(double a, double b) { return wrap(a - b); }
 
     // gun intercept: returns aim point
@@ -499,6 +570,13 @@ struct Bot {
         V3 muzzle{pos.x, pos.y, pos.z + muzzleH};
         V3 eye{pos.x, pos.y, pos.z + eyeH};
         double hpFrac = hp / max(1.0, maxhp);
+        if (!camp && hpFrac < 0.5) {
+            camp = true;
+            haveHide = false;
+        } else if (camp && hpFrac >= 0.85) {
+            camp = false;
+        }
+        GHOST = camp;
         int cubesNow = (int)num(S, "cubes", 0);
         int myId = (int)num(S, "id", -1);
 
@@ -630,6 +708,11 @@ struct Bot {
             gx = zc1.x + vx / vl * use;
             gy = zc1.y + vy / vl * use;
         }
+        if (GHOST && (!haveHide || fabs(hideR - zr1) > 0.5)) pickHideout(pos, zc1.x, zc1.y, zr1);
+        if (GHOST && haveHide) {
+            gx = hideX;
+            gy = hideY;
+        }
         // refresh flow field to the goal when needed
         double gd = hypot(gx - map.flowGX, gy - map.flowGY);
         if (map.loaded && (gd > 12 || t - flowRefreshT > 4.0 || map.cost.empty())) {
@@ -758,6 +841,17 @@ struct Bot {
             }
         }
 
+        bool farSeen = false, snipe = false;
+        if (GHOST && tgt && t >= underFireUntil) {
+            if (tgt->dist >= 60 && !canSeeUs(*tgt, eye) && (gunSlot >= 0 || laserSlot >= 0 || mortSlot >= 0)) {
+                snipe = true;  // they cannot see us: take a free shot from where we stand
+            } else if (tgt->dist >= 70) {
+                farSeen = true;
+                lastEnemyPos = tgt->pos;
+                lastEnemyT = t;
+                tgt = nullptr;
+            }
+        }
         if (tgt) {
             // ======================= COMBAT =======================
             int n150 = 0;
@@ -771,7 +865,7 @@ struct Bot {
                 }
             lastEnemyPos = tgt->pos;
             lastEnemyT = t;
-            bool flee = hpFrac < 0.38 || n150 >= 3;
+            bool flee = !snipe && (GHOST || hpFrac < 0.38 || n150 >= 3);
             mode = flee ? "flee" : "fight";
             V3 tc{tgt->pos.x, tgt->pos.y, tgt->pos.z + 4.5 * (1 + 0.05 * tgt->cubes)};
             double d = tgt->dist;
@@ -810,6 +904,11 @@ struct Bot {
             V3 mv = chooseMove(pos, dx, dy, en, zcx, zcy, zr, flee ? 1.2 : 0.4);
             moveX = mv.x;
             moveY = mv.y;
+            if (snipe && dodgeStrength <= 0) {
+                moveX = 0;
+                moveY = 0;
+                wantBoost = false;
+            }
             // ---------- aiming and firing
             bool clear = map.los(eye, V3{tgt->pos.x, tgt->pos.y, tgt->pos.z + 6});
             // gun
@@ -914,7 +1013,7 @@ struct Bot {
             // 1. loot (weapon pickups / cubes) when not pressed by the zone
             double lootX = 0, lootY = 0;
             bool haveLoot = false;
-            if (!zoneUrgent || distGoal < 25) {
+            if (!GHOST && (!zoneUrgent || distGoal < 25)) {
                 int wantRank = 0;
                 string held[2] = {slotKind[0], slotKind[1]};
                 int heldRank = max(weaponRank(held[0]), weaponRank(held[1]));
@@ -981,7 +1080,7 @@ struct Bot {
             bool haveDrop = false;
             V3 dropPos;
             double dropRad = 8, dropLands = 0;
-            if (!recentHit && hpFrac > 0.3) {
+            if (!GHOST && !recentHit && hpFrac > 0.3) {
                 double bestDD = 1e9;
                 for (auto& dr : o["drops"]) {
                     V3 dp = getV3(dr["pos"]);
@@ -1010,7 +1109,7 @@ struct Bot {
             int farmIdx = -1;
             V3 farmPos, farmVel;
             bool farmIsNpc = false;
-            if (t < 320 && cubesNow < 10 && hpFrac > 0.6 && !zoneUrgent && !haveLoot && (gunSlot >= 0 || ltnSlot >= 0)) {
+            if (!GHOST && t < 320 && cubesNow < 10 && hpFrac > 0.6 && !zoneUrgent && !haveLoot && (gunSlot >= 0 || ltnSlot >= 0)) {
                 double bd = 140;
                 int idx = 0;
                 for (auto& cr : o["crates"]) {
@@ -1097,8 +1196,9 @@ struct Bot {
                 } else {
                     moving = false;
                 }
-            } else if (t - lastEnemyT < 8.0 && hpFrac < 0.9 && hdist(lastEnemyPos, pos) < 260) {
+            } else if ((GHOST && farSeen) || (t - lastEnemyT < 8.0 && hpFrac < 0.9 && hdist(lastEnemyPos, pos) < 260)) {
                 mode = "evade";
+                speed = farSeen ? 0.42 : 1.0;
                 double ax = pos.x - lastEnemyPos.x, ay = pos.y - lastEnemyPos.y;
                 double al = max(1e-6, hypot(ax, ay));
                 dx = ax / al + zx * 0.5;
@@ -1108,7 +1208,7 @@ struct Bot {
                 pe.pos = lastEnemyPos;
                 pseudo.push_back(pe);
                 coverWt = 1.5;
-                if (energy > 60) wantBoost = true;
+                if (!GHOST && energy > 60) wantBoost = true;
             } else if (farmIdx >= 0) {
                 mode = "farm";
                 V3 ft = farmPos;
@@ -1140,7 +1240,7 @@ struct Bot {
                 }
                 farmFire = true;
                 speed = 0.8;
-            } else if (hpFrac > 0.5 && !zoneUrgent && ((t < 150 && !(ltnSlot >= 0 && laserSlot >= 0)) || (t < 220 && cubesNow < 5))) {
+            } else if (!GHOST && hpFrac > 0.5 && !zoneUrgent && ((t < 150 && !(ltnSlot >= 0 && laserSlot >= 0)) || (t < 220 && cubesNow < 5))) {
                 mode = "explore";
                 bool need = !haveWp || t - wpT > 25 || hdist(wp, pos) < 14;
                 if (need) {
@@ -1174,12 +1274,12 @@ struct Bot {
                 } else {
                     mode = "hold";
                 }
-            } else if (distGoal > 8 && (free || outsideNext)) {
+            } else if (distGoal > 8 && (GHOST || free || outsideNext)) {
                 mode = "travel";
                 dx = zx;
                 dy = zy;
                 moving = true;
-                speed = 1.0;
+                speed = (GHOST && !zoneUrgent) ? 0.42 : 1.0;
             } else {
                 mode = "hold";
             }
@@ -1351,7 +1451,7 @@ int main() {
             } catch (...) {
                 cerr << "hello parse failed\n";
             }
-            sendLine("{\"type\":\"ready\",\"name\":\"osu-cpp-v6\"}\n");
+            sendLine("{\"type\":\"ready\",\"name\":\"osu-cpp-hybrid\"}\n");
         } else if (type == "obs") {
             if (!haveHello) continue;
             try {
