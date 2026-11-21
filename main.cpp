@@ -369,8 +369,8 @@ struct Enemy {
 };
 
 static int weaponRank(const string& k) {
-    if (k == "laser") return 3;
-    if (k == "lightning") return 2;
+    if (k == "lightning") return 3;
+    if (k == "laser") return 2;
     if (k == "mortar") return 1;
     return 0;
 }
@@ -395,6 +395,11 @@ struct Bot {
     int lastTakeId = -1;
     V3 lastEnemyPos;
     double lastEnemyT = -100;
+    V3 wp;
+    double wpT = -100;
+    bool haveWp = false;
+    vector<V3> visited;
+    int lastVisitTick = -100;
     V3 farmLast;
     double farmSince = -100;
     vector<V3> farmBad;
@@ -525,6 +530,11 @@ struct Bot {
             }
         }
 
+        if (tick - lastVisitTick >= 20) {
+            visited.push_back(pos);
+            lastVisitTick = tick;
+            if (visited.size() > 200) visited.erase(visited.begin());
+        }
         // ---------------- events
         int pick = -1;
         double hitBearing = 0;
@@ -1072,6 +1082,40 @@ struct Bot {
                 }
                 farmFire = true;
                 speed = 0.8;
+            } else if (t < 150 && hpFrac > 0.5 && !zoneUrgent && ltnSlot < 0 && laserSlot < 0 && mortSlot < 0) {
+                mode = "explore";
+                bool need = !haveWp || t - wpT > 25 || hdist(wp, pos) < 14;
+                if (need) {
+                    double bestSc = -1e18;
+                    V3 bw = pos;
+                    for (int k = 0; k < 16; k++) {
+                        double a = 2 * PI * k / 16 + rnd() * 0.3;
+                        for (double r : {70.0, 110.0}) {
+                            V3 c{pos.x + cos(a) * r, pos.y + sin(a) * r, 0};
+                            if (hypot(c.x - zc1.x, c.y - zc1.y) > zr1 - 25) continue;
+                            if (hypot(c.x - zcx, c.y - zcy) > zr - 25) continue;
+                            if (map.loaded && map.navBlockedXY(c.x, c.y)) continue;
+                            double md = 1e9;
+                            for (auto& v : visited) md = min(md, hdist(v, c));
+                            double sc = min(md, 150.0) - 0.15 * hypot(c.x - zc1.x, c.y - zc1.y) + rnd() * 10;
+                            if (sc > bestSc) {
+                                bestSc = sc;
+                                bw = c;
+                            }
+                        }
+                    }
+                    wp = bw;
+                    haveWp = bestSc > -1e17;
+                    wpT = t;
+                }
+                if (haveWp) {
+                    dx = wp.x - pos.x;
+                    dy = wp.y - pos.y;
+                    moving = true;
+                    speed = 1.0;
+                } else {
+                    mode = "hold";
+                }
             } else if (distGoal > 8 && (free || outsideNext)) {
                 mode = "travel";
                 dx = zx;
