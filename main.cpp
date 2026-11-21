@@ -393,6 +393,11 @@ struct Bot {
     double scanPhase = 0;
     int takeTries = 0;
     int lastTakeId = -1;
+    V3 lastEnemyPos;
+    double lastEnemyT = -100;
+    V3 farmLast;
+    double farmSince = -100;
+    vector<V3> farmBad;
 
     double rnd() {
         rng ^= rng << 13;
@@ -562,11 +567,11 @@ struct Bot {
 
         // ---------------- visible things
         vector<Enemy> en;
-        vector<V3> npcs;
+        vector<pair<V3, V3>> npcs;
         for (auto& m : o["mechs"]) {
             string kind = m.value("kind", "mech");
             if (kind == "npc") {
-                npcs.push_back(getV3(m["pos"]));
+                npcs.push_back({getV3(m["pos"]), getV3(m["vel"])});
                 continue;
             }
             Enemy e;
@@ -752,7 +757,9 @@ struct Bot {
                     cxs += (pos.x - e.pos.x) * w;
                     cys += (pos.y - e.pos.y) * w;
                 }
-            bool flee = hpFrac < 0.35 || n150 >= 3;
+            lastEnemyPos = tgt->pos;
+            lastEnemyT = t;
+            bool flee = hpFrac < 0.38 || n150 >= 3;
             mode = flee ? "flee" : "fight";
             V3 tc{tgt->pos.x, tgt->pos.y, tgt->pos.z + 4.5 * (1 + 0.05 * tgt->cubes)};
             double d = tgt->dist;
@@ -801,8 +808,9 @@ struct Bot {
             aimYaw = wantYaw;
             aimPitch = clampd(wantPitch, -0.7, 1.3);
             double errYaw = fabs(angDiff(wantYaw, yaw));
-            double thr = clampd(atan2(2.2, max(d, 1.0)), 0.015, 0.12);
-            if (gunSlot >= 0 && d < gunRange - 12 && clear && errYaw < thr && gunAmmo > 0) {
+            double thr = clampd(atan2(3.0, max(d, 1.0)), 0.02, 0.16);
+            double errPit = fabs(aimPitch - pitch);
+            if (gunSlot >= 0 && d < gunRange - 12 && clear && errYaw < thr && errPit < thr + 0.03 && gunAmmo > 0) {
                 if (gunSlot == 0) fire0 = true;
                 else fire1 = true;
             }
@@ -887,6 +895,10 @@ struct Bot {
             double dx = 0, dy = 0;
             bool moving = false;
             bool free = (t >= ss - leadT) ? true : false;  // slack exhausted
+            vector<Enemy> pseudo;
+            double coverWt = 0;
+            bool farmFire = false;
+            double farmYaw = 0, farmPitch = 0;
             // 1. loot (weapon pickups / cubes) when not pressed by the zone
             double lootX = 0, lootY = 0;
             bool haveLoot = false;
@@ -938,6 +950,56 @@ struct Bot {
                     }
                 }
             }
+            // farm target: nearest crate or drone early in the match
+            int farmIdx = -1;
+            V3 farmPos, farmVel;
+            bool farmIsNpc = false;
+            if (t < 200 && hpFrac > 0.6 && !zoneUrgent && !haveLoot && (gunSlot >= 0)) {
+                double bd = 90;
+                int idx = 0;
+                for (auto& cr : o["crates"]) {
+                    V3 cp = getV3(cr["pos"]);
+                    cp.z += 1.5;
+                    double dd = hdist(cp, pos);
+                    bool bad = false;
+                    for (auto& b : farmBad)
+                        if (hdist(b, cp) < 3) bad = true;
+                    if (!bad && dd < bd && fabs(cp.z - pos.z) < 14) {
+                        bd = dd;
+                        farmIdx = idx;
+                        farmPos = cp;
+                        farmVel = V3{0, 0, 0};
+                        farmIsNpc = false;
+                    }
+                    idx++;
+                }
+                for (auto& np : npcs) {
+                    V3 cp = np.first;
+                    cp.z += 1.75;
+                    double dd = hdist(cp, pos);
+                    bool bad = false;
+                    for (auto& b : farmBad)
+                        if (hdist(b, cp) < 12) bad = true;
+                    if (!bad && dd < bd && fabs(cp.z - pos.z) < 14) {
+                        bd = dd;
+                        farmIdx = idx;
+                        farmPos = cp;
+                        farmVel = np.second;
+                        farmIsNpc = true;
+                    }
+                    idx++;
+                }
+                if (farmIdx >= 0) {
+                    if (hdist(farmLast, farmPos) > (farmIsNpc ? 14 : 3)) {
+                        farmSince = t;
+                    }
+                    farmLast = farmPos;
+                    if (t - farmSince > 22) {
+                        farmBad.push_back(farmPos);
+                        farmIdx = -1;
+                    }
+                }
+            }
             double zx = 0, zy = 0;
             zoneDir(zx, zy);
             if (zoneUrgent) {
@@ -967,6 +1029,49 @@ struct Bot {
                 dy = py * strafeSign + zy * 0.5;
                 moving = true;
                 aimYaw = lastHitBearing;
+            } else if (t - lastEnemyT < 8.0 && hpFrac < 0.9 && hdist(lastEnemyPos, pos) < 260) {
+                mode = "evade";
+                double ax = pos.x - lastEnemyPos.x, ay = pos.y - lastEnemyPos.y;
+                double al = max(1e-6, hypot(ax, ay));
+                dx = ax / al + zx * 0.5;
+                dy = ay / al + zy * 0.5;
+                moving = true;
+                Enemy pe;
+                pe.pos = lastEnemyPos;
+                pseudo.push_back(pe);
+                coverWt = 1.5;
+                if (energy > 60) wantBoost = true;
+            } else if (farmIdx >= 0) {
+                mode = "farm";
+                V3 ft = farmPos;
+                double fdx = ft.x - pos.x, fdy = ft.y - pos.y;
+                double fd = max(1e-6, hypot(fdx, fdy));
+                bool seen = map.los(eye, ft);
+                if (fd > 34 || (!seen && fd > 6)) {
+                    dx = fdx;
+                    dy = fdy;
+                    moving = true;
+                } else if (farmIsNpc && fd < 18) {
+                    dx = -fdx;
+                    dy = -fdy;
+                    moving = true;
+                }
+                V3 ap = farmIsNpc ? lead(muzzle, ft, farmVel, gunSpeedNow) : ft;
+                double adx = ap.x - muzzle.x, ady = ap.y - muzzle.y, adz = ap.z - muzzle.z;
+                aimYaw = atan2(ady, adx);
+                aimPitch = clampd(atan2(adz, max(1e-6, hypot(adx, ady))), -0.7, 1.3);
+                bool clr = map.los(eye, ap);
+                double ey = fabs(angDiff(aimYaw, yaw));
+                double th2 = clampd(atan2(2.5, max(fd, 1.0)), 0.03, 0.2);
+                if (clr && ey < th2 && fd < 80) {
+                    if (ltnSlot >= 0 && fd < 38 && energy > 30) {
+                        if (ltnSlot == 0) fire0 = true; else fire1 = true;
+                    } else if (gunSlot >= 0 && gunAmmo > 0) {
+                        if (gunSlot == 0) fire0 = true; else fire1 = true;
+                    }
+                }
+                farmFire = true;
+                speed = 0.8;
             } else if (distGoal > 8 && (free || outsideNext)) {
                 mode = "travel";
                 dx = zx;
@@ -983,12 +1088,12 @@ struct Bot {
                 speed = 1.0;
             }
             if (moving) {
-                V3 mv = chooseMove(pos, dx, dy, en, zcx, zcy, zr, 0.0);
+                V3 mv = chooseMove(pos, dx, dy, pseudo.empty() ? en : pseudo, zcx, zcy, zr, coverWt);
                 moveX = mv.x * speed;
                 moveY = mv.y * speed;
             }
             // look direction: sounds first, else slow sweep
-            if (mode != "hit") {
+            if (mode != "hit" && mode != "farm") {
                 bool heard = false;
                 double bestAge = 1e9;
                 for (auto& s : o["sounds"]) {
@@ -1011,8 +1116,8 @@ struct Bot {
                     }
                 }
             }
-            aimPitch = 0;
-            if (gunSlot >= 0 && gunAmmo < 6 && !moving) reload = true;
+            if (mode != "farm") aimPitch = 0;
+            if (gunSlot >= 0 && gunAmmo < 6 && !moving && mode != "farm") reload = true;
         }
 
         // boost handling with hysteresis
