@@ -393,6 +393,7 @@ struct Enemy {
     bool charging = false;
     double dist = 0;
     bool hasLaser = false;
+    bool hasGun = true, hasLtn = false, hasMortar = false;
 };
 
 static int weaponRank(const string& k) {
@@ -677,9 +678,17 @@ struct Bot {
             e.cubes = (int)num(m, "cubes", 0);
             e.charging = m.value("charging", false);
             e.dist = hdist(e.pos, pos);
-            if (m.contains("weapons") && m["weapons"].is_array())
-                for (auto& w : m["weapons"])
-                    if (w.is_string() && w.get<string>() == "laser") e.hasLaser = true;
+            if (m.contains("weapons") && m["weapons"].is_array()) {
+                e.hasGun = false;
+                for (auto& w : m["weapons"]) {
+                    if (!w.is_string()) continue;
+                    string wk = w.get<string>();
+                    if (wk == "laser") e.hasLaser = true;
+                    else if (wk == "gun") e.hasGun = true;
+                    else if (wk == "lightning") e.hasLtn = true;
+                    else if (wk == "mortar") e.hasMortar = true;
+                }
+            }
             en.push_back(e);
         }
         sort(en.begin(), en.end(), [](const Enemy& a, const Enemy& b) { return a.dist < b.dist; });
@@ -865,13 +874,31 @@ struct Bot {
                 }
             lastEnemyPos = tgt->pos;
             lastEnemyT = t;
-            bool flee = !snipe && (GHOST || hpFrac < 0.38 || n150 >= 3);
+            // ---- duel arithmetic: who wins the damage race against everything close by?
+            double ourBase = 0;
+            if (gunSlot >= 0) ourBase += 110;
+            if (laserSlot >= 0) ourBase += 100;
+            if (mortSlot >= 0) ourBase += 70;
+            if (ltnSlot >= 0 && tgt->dist < 44) ourBase += 220;
+            double ourDps = max(30.0, ourBase * (1 + 0.04 * min(cubesNow, 10)));
+            double hpSum = 0, theirDps = 0;
+            for (auto& e : en) {
+                if (e.dist >= 110) continue;
+                double dps = (e.hasGun ? 110 : 0) + (e.hasLaser ? 100 : 0) + (e.hasMortar ? 70 : 0) + ((e.hasLtn && e.dist < 45) ? 220 : 0);
+                if (dps < 60) dps = 60;
+                theirDps += dps * (1 + 0.04 * min(e.cubes, 10));
+                hpSum += e.hp;
+            }
+            double ttkUs = hpSum / ourDps;
+            double ttkThem = max(0.1, hp / max(30.0, theirDps));
+            bool losing = hpSum > 0 && (ttkUs / ttkThem) > 1.5;
+            bool flee = !snipe && (GHOST || losing || hpFrac < 0.3 || n150 >= 3);
             mode = flee ? "flee" : "fight";
             V3 tc{tgt->pos.x, tgt->pos.y, tgt->pos.z + 4.5 * (1 + 0.05 * tgt->cubes)};
             double d = tgt->dist;
             double dx = 0, dy = 0;
             double R = 36;
-            if (ltnSlot >= 0) R = 20;
+            if (ltnSlot >= 0) R = 18;
             else if (laserSlot >= 0) R = 55;
             else if (mortSlot >= 0) R = 45;
             double tx = tgt->pos.x - pos.x, ty = tgt->pos.y - pos.y;
@@ -921,7 +948,8 @@ struct Bot {
             double errYaw = fabs(angDiff(wantYaw, yaw));
             double thr = clampd(atan2(3.0, max(d, 1.0)), 0.02, 0.16);
             double errPit = fabs(aimPitch - pitch);
-            if (gunSlot >= 0 && d < gunRange - 12 && clear && errYaw < thr && errPit < thr + 0.03 && gunAmmo > 0) {
+            if (gunSlot >= 0 && d < gunRange - 12 && clear && errYaw < thr && errPit < thr + 0.03 && gunAmmo > 0 &&
+                (d <= 110 || tgt->hp < 500 || hypot(tgt->vel.x, tgt->vel.y) < 2.5)) {
                 if (gunSlot == 0) fire0 = true;
                 else fire1 = true;
             }
@@ -999,7 +1027,7 @@ struct Bot {
                     }
                 }
             }
-            if (gunAmmo <= 0 && gunSlot >= 0) reload = true;
+            if (gunSlot >= 0 && (gunAmmo <= 0 || (gunAmmo <= 4 && (d > 70 || !clear)))) reload = true;
         } else {
             // ======================= NO ENEMY IN SIGHT =======================
             bool recentHit = t < underFireUntil;
@@ -1032,7 +1060,7 @@ struct Bot {
                         if (gunSlot >= 0) {
                             int ss = 1 - gunSlot;
                             string sk = slotKind[ss];
-                            bool pair = (k == "lightning" && sk == "laser") || (k == "laser" && sk == "lightning");
+                            bool pair = false;  // always keep the gun: gun + lightning fire together
                             if (pair) {
                                 allowed = true;
                                 candDrop = gunSlot;  // swap the gun out for the lightning+laser pair
@@ -1240,7 +1268,7 @@ struct Bot {
                 }
                 farmFire = true;
                 speed = 0.8;
-            } else if (!GHOST && hpFrac > 0.5 && !zoneUrgent && ((t < 150 && !(ltnSlot >= 0 && laserSlot >= 0)) || (t < 220 && cubesNow < 5))) {
+            } else if (!GHOST && hpFrac > 0.5 && !zoneUrgent && ((t < 150 && ltnSlot < 0 && laserSlot < 0 && mortSlot < 0) || (t < 220 && cubesNow < 5))) {
                 mode = "explore";
                 bool need = !haveWp || t - wpT > 25 || hdist(wp, pos) < 14;
                 if (need) {
@@ -1451,7 +1479,7 @@ int main() {
             } catch (...) {
                 cerr << "hello parse failed\n";
             }
-            sendLine("{\"type\":\"ready\",\"name\":\"osu-cpp-hybrid\"}\n");
+            sendLine("{\"type\":\"ready\",\"name\":\"osu-cpp-duel\"}\n");
         } else if (type == "obs") {
             if (!haveHello) continue;
             try {
