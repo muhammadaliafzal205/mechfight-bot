@@ -571,7 +571,7 @@ struct Bot {
         V3 muzzle{pos.x, pos.y, pos.z + muzzleH};
         V3 eye{pos.x, pos.y, pos.z + eyeH};
         double hpFrac = hp / max(1.0, maxhp);
-        if (!camp && hpFrac < 0.5) {
+        if (false && !camp && hpFrac < 0.5) {
             camp = true;
             haveHide = false;
         } else if (camp && hpFrac >= 0.85) {
@@ -842,7 +842,7 @@ struct Bot {
             double bestScore = 1e18;
             for (auto& e : en) {
                 if (e.dist > 240) continue;
-                double sc = e.dist + e.hp * 0.03;
+                double sc = e.dist + e.hp * 0.06;
                 if (sc < bestScore) {
                     bestScore = sc;
                     tgt = &e;
@@ -892,7 +892,7 @@ struct Bot {
             double ttkUs = hpSum / ourDps;
             double ttkThem = max(0.1, hp / max(30.0, theirDps));
             bool losing = hpSum > 0 && (ttkUs / ttkThem) > 1.5;
-            bool flee = !snipe && (GHOST || losing || hpFrac < 0.3 || n150 >= 3);
+            bool flee = false;  // berserker: always fight, never run
             mode = flee ? "flee" : "fight";
             V3 tc{tgt->pos.x, tgt->pos.y, tgt->pos.z + 4.5 * (1 + 0.05 * tgt->cubes)};
             double d = tgt->dist;
@@ -946,10 +946,9 @@ struct Bot {
             aimYaw = wantYaw;
             aimPitch = clampd(wantPitch, -0.7, 1.3);
             double errYaw = fabs(angDiff(wantYaw, yaw));
-            double thr = clampd(atan2(3.0, max(d, 1.0)), 0.02, 0.16);
+            double thr = clampd(atan2(3.5, max(d, 1.0)), 0.03, 0.2);
             double errPit = fabs(aimPitch - pitch);
-            if (gunSlot >= 0 && d < gunRange - 12 && clear && errYaw < thr && errPit < thr + 0.03 && gunAmmo > 0 &&
-                (d <= 110 || tgt->hp < 500 || hypot(tgt->vel.x, tgt->vel.y) < 2.5)) {
+            if (gunSlot >= 0 && d < gunRange - 12 && clear && errYaw < thr && errPit < thr + 0.03 && gunAmmo > 0) {
                 if (gunSlot == 0) fire0 = true;
                 else fire1 = true;
             }
@@ -1027,7 +1026,7 @@ struct Bot {
                     }
                 }
             }
-            if (gunSlot >= 0 && (gunAmmo <= 0 || (gunAmmo <= 4 && (d > 70 || !clear)))) reload = true;
+            if (gunAmmo <= 0 && gunSlot >= 0) reload = true;
         } else {
             // ======================= NO ENEMY IN SIGHT =======================
             bool recentHit = t < underFireUntil;
@@ -1224,7 +1223,7 @@ struct Bot {
                 } else {
                     moving = false;
                 }
-            } else if ((GHOST && farSeen) || (t - lastEnemyT < 8.0 && hpFrac < 0.9 && hdist(lastEnemyPos, pos) < 260)) {
+            } else if (GHOST && farSeen) {
                 mode = "evade";
                 speed = farSeen ? 0.42 : 1.0;
                 double ax = pos.x - lastEnemyPos.x, ay = pos.y - lastEnemyPos.y;
@@ -1479,7 +1478,7 @@ int main() {
             } catch (...) {
                 cerr << "hello parse failed\n";
             }
-            sendLine("{\"type\":\"ready\",\"name\":\"osu-cpp-duel\"}\n");
+            sendLine("{\"type\":\"ready\",\"name\":\"osu-cpp-berserk\"}\n");
         } else if (type == "obs") {
             if (!haveHello) continue;
             try {
