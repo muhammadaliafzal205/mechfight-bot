@@ -499,6 +499,8 @@ struct Bot {
         V3 muzzle{pos.x, pos.y, pos.z + muzzleH};
         V3 eye{pos.x, pos.y, pos.z + eyeH};
         double hpFrac = hp / max(1.0, maxhp);
+        int cubesNow = (int)num(S, "cubes", 0);
+        int myId = (int)num(S, "id", -1);
 
         // ---------------- weapons held
         int gunSlot = -1, laserSlot = -1, ltnSlot = -1, mortSlot = -1;
@@ -960,12 +962,41 @@ struct Bot {
                     }
                 }
             }
+            // supply drop worth walking to
+            bool haveDrop = false;
+            V3 dropPos;
+            double dropRad = 8, dropLands = 0;
+            if (!recentHit && hpFrac > 0.3) {
+                double bestDD = 1e9;
+                for (auto& dr : o["drops"]) {
+                    V3 dp = getV3(dr["pos"]);
+                    double landsIn = num(dr, "lands_in", 0);
+                    double rad = num(dr, "radius", 8);
+                    double dd = hdist(dp, pos);
+                    bool someoneElse = false;
+                    if (dr.contains("holder") && dr["holder"].is_number()) {
+                        int h = (int)dr["holder"].get<double>();
+                        if (h != myId && num(dr, "progress", 0) > 0.3) someoneElse = true;
+                    }
+                    if (someoneElse) continue;
+                    if (hypot(dp.x - zc1.x, dp.y - zc1.y) > zr1 - 4 && hypot(dp.x - zcx, dp.y - zcy) > zr - 8) continue;
+                    if (dd > 260) continue;
+                    if (dd / max(1.0, walk * 0.9) > landsIn + 30) continue;
+                    if (dd < bestDD) {
+                        bestDD = dd;
+                        dropPos = dp;
+                        dropRad = rad;
+                        dropLands = landsIn;
+                        haveDrop = true;
+                    }
+                }
+            }
             // farm target: nearest crate or drone early in the match
             int farmIdx = -1;
             V3 farmPos, farmVel;
             bool farmIsNpc = false;
-            if (t < 200 && hpFrac > 0.6 && !zoneUrgent && !haveLoot && (gunSlot >= 0)) {
-                double bd = 90;
+            if (t < 320 && cubesNow < 10 && hpFrac > 0.6 && !zoneUrgent && !haveLoot && (gunSlot >= 0)) {
+                double bd = 140;
                 int idx = 0;
                 for (auto& cr : o["crates"]) {
                     V3 cp = getV3(cr["pos"]);
@@ -1039,6 +1070,18 @@ struct Bot {
                 dy = py * strafeSign + zy * 0.5;
                 moving = true;
                 aimYaw = lastHitBearing;
+            } else if (haveDrop) {
+                mode = "drop";
+                double ddx = dropPos.x - pos.x, ddy = dropPos.y - pos.y;
+                double dd = hypot(ddx, ddy);
+                if (dd > dropRad * 0.45) {
+                    dx = ddx;
+                    dy = ddy;
+                    moving = true;
+                    if (dd / max(1.0, walk * 0.9) > dropLands + 6 && energy > 50) wantBoost = true;
+                } else {
+                    moving = false;
+                }
             } else if (t - lastEnemyT < 8.0 && hpFrac < 0.9 && hdist(lastEnemyPos, pos) < 260) {
                 mode = "evade";
                 double ax = pos.x - lastEnemyPos.x, ay = pos.y - lastEnemyPos.y;
@@ -1082,7 +1125,7 @@ struct Bot {
                 }
                 farmFire = true;
                 speed = 0.8;
-            } else if (t < 150 && hpFrac > 0.5 && !zoneUrgent && ltnSlot < 0 && laserSlot < 0 && mortSlot < 0) {
+            } else if (hpFrac > 0.5 && !zoneUrgent && ((t < 150 && ltnSlot < 0 && laserSlot < 0 && mortSlot < 0) || (t < 220 && cubesNow < 5))) {
                 mode = "explore";
                 bool need = !haveWp || t - wpT > 25 || hdist(wp, pos) < 14;
                 if (need) {
