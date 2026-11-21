@@ -715,7 +715,7 @@ struct Bot {
         // strafe timer
         if (tick >= nextFlip) {
             strafeSign = (rnd() < 0.5) ? -1 : 1;
-            nextFlip = tick + 8 + (int)(rnd() * 12);
+            nextFlip = tick + 6 + (int)(rnd() * 10);
         }
 
         // ---------------- action defaults
@@ -764,10 +764,10 @@ struct Bot {
             V3 tc{tgt->pos.x, tgt->pos.y, tgt->pos.z + 4.5 * (1 + 0.05 * tgt->cubes)};
             double d = tgt->dist;
             double dx = 0, dy = 0;
-            double R = 70;
-            if (ltnSlot >= 0) R = 32;
-            else if (laserSlot >= 0) R = 90;
-            else if (mortSlot >= 0) R = 80;
+            double R = 36;
+            if (ltnSlot >= 0) R = 20;
+            else if (laserSlot >= 0) R = 55;
+            else if (mortSlot >= 0) R = 45;
             double tx = tgt->pos.x - pos.x, ty = tgt->pos.y - pos.y;
             double tl = max(1e-6, hypot(tx, ty));
             tx /= tl;
@@ -781,7 +781,7 @@ struct Bot {
                 dy = ay * 1.0 + zy * 0.6 + (tx) * strafeSign * 0.3;
                 if (energy > 25 || boostLatch) wantBoost = true;
             } else {
-                double radial = clampd((d - R) / 30.0, -1, 1);
+                double radial = clampd((d - R) / 20.0, -1, 1);
                 dx = tx * radial + (-ty) * strafeSign;
                 dy = ty * radial + (tx) * strafeSign;
                 if (zoneUrgent) {
